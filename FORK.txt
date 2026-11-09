@@ -16,7 +16,7 @@ nightly-2026-11-09, and the committed Cargo.lock.
   cargo +nightly-2026-11-09 test --locked -p wm-platform display_listener::tests -- --test-threads=1
   cargo +nightly-2026-11-09 test --locked -p wm-platform notification_center::tests -- --test-threads=1
   cargo +nightly-2026-11-09 clippy --locked --all-targets --all-features -- -D warnings
-  VERSION_NUMBER=3.10.1-sleep.1 cargo +nightly-2026-11-09 build --locked --release
+  VERSION_NUMBER=3.10.1-sleep.2 cargo +nightly-2026-11-09 build --locked --release
 
 Four wake regressions pass. Restoring the old notification mapping makes the
 wake regression fail. No patched application is installed automatically.
@@ -26,3 +26,10 @@ included: this branch addresses display state and layout recovery only.
 
 A local/ad-hoc build has a different signing identity from upstream. macOS
 may require Accessibility permission to be granted again after installation.
+
+Overlay-window guard (based on glzr-io/glazewm#1435, a7c2b0a): only normal
+Core Graphics window layer 0 may enter tiling. Recheck the layer after AX
+metadata reads to reject windows promoted to overlays during discovery.
+Main Outlook was measured at layer 0. Its transient meeting notification
+has not yet been captured, so this guard is not a verified Outlook-specific
+fix. No process/title-wide Outlook ignore rule is installed.
