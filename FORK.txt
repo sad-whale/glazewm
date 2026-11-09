@@ -1,0 +1,25 @@
+macOS sleep fixes for GlazeWM
+
+Application base: upstream v3.10.1.
+Wake recovery also handles screen wake, session activation and unlock.
+An empty active-display list retains workspace assignments. Accessibility
+callbacks run in common run-loop modes with bounded messaging timeouts.
+Display geometry is recaptured after startup and display changes, with stale
+recaptures cancelled on sleep or a newer recovery event.
+
+Based on glzr-io/glazewm#1468 (40a977fbffbc6193cf3042d364e9a7ec3b1859a0)
+and #1458 (b4c4be9, 0f52640). Original authors retain attribution in commits.
+
+Validated locally with rustc 1.102.0-nightly (5b7b37aef 2026-11-08), from
+nightly-2026-11-09, and the committed Cargo.lock.
+
+  cargo +nightly-2026-11-09 test --locked -p wm-platform display_listener::tests -- --test-threads=1
+  cargo +nightly-2026-11-09 test --locked -p wm-platform notification_center::tests -- --test-threads=1
+  cargo +nightly-2026-11-09 clippy --locked --all-targets --all-features -- -D warnings
+  VERSION_NUMBER=3.10.1-sleep.1 cargo +nightly-2026-11-09 build --locked --release
+
+Four wake regressions pass. Restoring the old notification mapping makes the
+wake regression fail. No patched application is installed automatically.
+Real sleep/wake, clamshell and display hotplug acceptance must be completed
+before replacing a daily-use build. The separate event-tap issue #1420 is not
+included: this branch addresses display state and layout recovery only.
