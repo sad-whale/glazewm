@@ -210,11 +210,7 @@ async fn start_wm(
         wm.process_event(PlatformEvent::Keybinding(event), &mut config)
       }
       _ = cleanup_interval.tick() => {
-        if wm.state.is_paused {
-          Ok(())
-        } else {
-          wm.state.cleanup_invalid_windows()
-        }
+        wm.cleanup_invalid_windows(&mut config)
       },
       Some((
         message,

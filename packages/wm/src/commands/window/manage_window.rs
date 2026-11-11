@@ -23,6 +23,12 @@ pub fn manage_window(
   state: &mut WmState,
   config: &mut UserConfig,
 ) -> anyhow::Result<()> {
+  if state.window_from_native(&native_window).is_some()
+    || state.ignored_windows.contains(&native_window)
+  {
+    return Ok(());
+  }
+
   let Some(native_properties) =
     check_is_manageable(&native_window).unwrap_or(None)
   else {

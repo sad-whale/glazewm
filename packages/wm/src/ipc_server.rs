@@ -8,7 +8,14 @@ use tokio::{
   sync::{broadcast, mpsc},
   task,
 };
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{
+  accept_hdr_async,
+  tungstenite::{
+    handshake::server::{ErrorResponse, Request, Response},
+    http::{StatusCode, Uri},
+    Message,
+  },
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 use wm_common::{
@@ -85,7 +92,7 @@ impl IpcServer {
   ) -> anyhow::Result<()> {
     info!("Incoming IPC connection from: {}.", addr);
 
-    let ws_stream = accept_async(stream)
+    let ws_stream = accept_hdr_async(stream, validate_ipc_origin)
       .await
       .context("Error during websocket handshake.")?;
 
@@ -406,5 +413,123 @@ impl IpcServer {
 impl Drop for IpcServer {
   fn drop(&mut self) {
     self.stop();
+  }
+}
+
+#[allow(
+  clippy::result_large_err,
+  reason = "WebSocket handshake callbacks require this response type"
+)]
+fn validate_ipc_origin(
+  request: &Request,
+  response: Response,
+) -> Result<Response, ErrorResponse> {
+  let allowed = request.headers().get_all("origin").iter().all(|origin| {
+    origin
+      .to_str()
+      .ok()
+      .and_then(|origin| origin.parse::<Uri>().ok())
+      .is_some_and(|origin| {
+        matches!(origin.scheme_str(), Some("http" | "https" | "tauri"))
+          && matches!(
+            origin.host(),
+            Some("localhost" | "127.0.0.1" | "[::1]")
+          )
+      })
+  });
+  if allowed {
+    Ok(response)
+  } else {
+    let mut response =
+      ErrorResponse::new(Some("IPC origin is not allowed.".into()));
+    *response.status_mut() = StatusCode::FORBIDDEN;
+    Err(response)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use tokio_tungstenite::{
+    connect_async, tungstenite::client::IntoClientRequest,
+  };
+
+  use super::*;
+
+  #[test]
+  fn ipc_accepts_cli_and_local_frontends_only() {
+    for origin in [
+      None,
+      Some("http://127.0.0.1:6124"),
+      Some("http://localhost:4200"),
+      Some("tauri://localhost"),
+      Some("http://[::1]:6124"),
+    ] {
+      let mut request = Request::builder();
+      if let Some(origin) = origin {
+        request = request.header("origin", origin);
+      }
+      assert!(
+        validate_ipc_origin(&request.body(()).unwrap(), Response::new(()))
+          .is_ok(),
+        "{origin:?}"
+      );
+    }
+    for origin in [
+      "https://example.invalid",
+      "http://localhost.example.invalid",
+      "null",
+      "file://localhost",
+      "not a URL",
+    ] {
+      let request = Request::builder()
+        .header("origin", origin)
+        .body(())
+        .unwrap();
+      let response =
+        validate_ipc_origin(&request, Response::new(())).unwrap_err();
+      assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin}");
+    }
+  }
+
+  #[tokio::test]
+  async fn websocket_handshake_preserves_cli_and_zebar() {
+    for origin in [None, Some("http://127.0.0.1:6124")] {
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      let server = task::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        accept_hdr_async(stream, validate_ipc_origin).await
+      });
+      let mut request =
+        format!("ws://{addr}").into_client_request().unwrap();
+      if let Some(origin) = origin {
+        request
+          .headers_mut()
+          .insert("origin", origin.parse().unwrap());
+      }
+      let connection = connect_async(request).await;
+      assert!(connection.is_ok(), "{origin:?}");
+      assert!(server.await.unwrap().is_ok());
+    }
+  }
+
+  #[tokio::test]
+  async fn websocket_handshake_rejects_remote_origin() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = task::spawn(async move {
+      let (stream, _) = listener.accept().await.unwrap();
+      accept_hdr_async(stream, validate_ipc_origin).await
+    });
+    let mut request =
+      format!("ws://{addr}").into_client_request().unwrap();
+    request
+      .headers_mut()
+      .insert("origin", "https://example.invalid".parse().unwrap());
+    let error = connect_async(request).await.unwrap_err();
+    assert!(
+      matches!(error, tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == StatusCode::FORBIDDEN)
+    );
+    assert!(server.await.unwrap().is_err());
   }
 }

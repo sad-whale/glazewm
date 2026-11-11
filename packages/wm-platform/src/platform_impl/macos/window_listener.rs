@@ -88,7 +88,7 @@ impl WindowListener {
     let app_observers = running_apps
       .into_iter()
       .filter_map(|app| {
-        Self::create_app_observer(&app, events_tx.clone()).ok()
+        Self::create_app_observer(&app, events_tx.clone(), true).ok()
       })
       .collect::<Vec<_>>();
 
@@ -172,19 +172,33 @@ impl WindowListener {
         NotificationEvent::WorkspaceDidActivateApplication(
           running_app,
         ) => {
-          let Ok(Ok(Some(focused_window))) =
+          let pid = running_app.processIdentifier();
+          let needs_observer = !app_observers.contains_key(&pid);
+          let Ok((observer, focused_window)) =
             dispatcher.dispatch_sync(|| {
               let app = Application::new(running_app, dispatcher.clone());
-              app.focused_window()
+              // Launch notifications can arrive before AX is ready.
+              let observer = needs_observer
+                .then(|| {
+                  Self::create_app_observer(&app, events_tx.clone(), false)
+                    .ok()
+                })
+                .flatten();
+              (observer, app.focused_window().ok().flatten())
             })
           else {
             continue;
           };
 
-          let _ = events_tx.send(WindowEvent::Focused {
-            window: focused_window,
-            notification: crate::WindowEventNotification(None),
-          });
+          if let Some(observer) = observer {
+            app_observers.insert(pid, observer);
+          }
+          if let Some(focused_window) = focused_window {
+            let _ = events_tx.send(WindowEvent::Focused {
+              window: focused_window,
+              notification: crate::WindowEventNotification(None),
+            });
+          }
         }
         NotificationEvent::WorkspaceDidHideApplication(running_app) => {
           if let Some(app_observer) =
@@ -210,6 +224,7 @@ impl WindowListener {
   fn create_app_observer(
     app: &Application,
     events_tx: mpsc::UnboundedSender<WindowEvent>,
+    is_startup: bool,
   ) -> crate::Result<ApplicationObserver> {
     if !app.should_observe() {
       return Err(crate::Error::Platform(format!(
@@ -218,7 +233,8 @@ impl WindowListener {
       )));
     }
 
-    let app_observer_res = ApplicationObserver::new(app, events_tx, true);
+    let app_observer_res =
+      ApplicationObserver::new(app, events_tx, is_startup);
 
     if let Err(err) = &app_observer_res {
       tracing::debug!(

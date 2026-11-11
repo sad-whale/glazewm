@@ -47,6 +47,9 @@ pub(crate) struct ApplicationObserver {
   events_tx: mpsc::UnboundedSender<WindowEvent>,
   _observer: CFRetained<AXObserver>,
   observer_source: CFRetained<CFRunLoopSource>,
+  // Keep callback data alive until the source is invalidated and the main
+  // thread has finished any in-flight callback.
+  _context: ThreadBound<Box<ApplicationEventContext>>,
 }
 
 // TODO: Remove this.
@@ -80,35 +83,44 @@ impl ApplicationObserver {
         ));
       }
 
-      CFRetained::retain(NonNull::new(observer).ok_or_else(|| {
+      // AXObserverCreate already transfers a +1 reference to the caller.
+      CFRetained::from_raw(NonNull::new(observer).ok_or_else(|| {
         crate::Error::InvalidPointer("AXObserver is null.".to_string())
       })?)
     };
 
     let app_windows = Arc::new(Mutex::new(app.windows()?));
-    let context = Box::into_raw(Box::new(ApplicationEventContext {
+    let mut context = Box::new(ApplicationEventContext {
       application: app.clone(),
       events_tx: events_tx.clone(),
       app_windows: app_windows.clone(),
       observer: observer.clone(),
-    }));
+    });
+    let context_ptr = std::ptr::from_mut(context.as_mut());
 
     let runloop =
       CFRunLoop::current().ok_or(crate::Error::EventLoopStopped)?;
 
     let observer_source = unsafe { observer.run_loop_source() };
+    let app_observer = Self {
+      pid: app.pid,
+      app_windows: app_windows.clone(),
+      events_tx,
+      _observer: observer.clone(),
+      observer_source: observer_source.clone(),
+      _context: ThreadBound::new(context, app.dispatcher.clone()),
+    };
     runloop.add_source(Some(&observer_source), unsafe {
       kCFRunLoopCommonModes
     });
 
-    // Register for all window notifications.
-    // TODO: Remove from runloop if registration fails.
-    Self::register_app_notifications(app, &observer, context)?;
+    // The owner invalidates the source if notification registration fails.
+    Self::register_app_notifications(app, &observer, context_ptr)?;
 
     // Emit `WindowEvent::Shown` for all existing windows.
     for window in app_windows.lock().unwrap().iter() {
       if let Err(err) =
-        Self::register_window_notifications(window, &observer, context)
+        Self::register_window_notifications(window, &observer, context_ptr)
       {
         tracing::warn!(
           "Failed to register window notifications for PID {}: {}",
@@ -120,7 +132,7 @@ impl ApplicationObserver {
       // Don't emit `WindowEvent::Shown` for windows that are already
       // running on startup.
       if !is_startup {
-        if let Err(err) = events_tx.send(WindowEvent::Shown {
+        if let Err(err) = app_observer.events_tx.send(WindowEvent::Shown {
           window: window.clone(),
           notification: crate::WindowEventNotification(None),
         }) {
@@ -133,13 +145,7 @@ impl ApplicationObserver {
       }
     }
 
-    Ok(Self {
-      pid: app.pid,
-      app_windows,
-      events_tx,
-      _observer: observer,
-      observer_source,
-    })
+    Ok(app_observer)
   }
 
   fn register_app_notifications(

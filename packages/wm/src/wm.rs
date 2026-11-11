@@ -73,6 +73,20 @@ impl WindowManager {
     })
   }
 
+  pub fn cleanup_invalid_windows(
+    &mut self,
+    config: &mut UserConfig,
+  ) -> anyhow::Result<()> {
+    if self.state.is_paused {
+      return Ok(());
+    }
+    self.state.cleanup_invalid_windows()?;
+    if self.state.pending_sync.has_changes() {
+      platform_sync(&mut self.state, config)?;
+    }
+    Ok(())
+  }
+
   pub fn process_event(
     &mut self,
     event: PlatformEvent,

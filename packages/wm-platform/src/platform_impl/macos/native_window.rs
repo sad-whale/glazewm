@@ -8,7 +8,10 @@ use objc2_application_services::{AXError, AXValue};
 use objc2_core_foundation::{
   CFBoolean, CFRetained, CFString, CGPoint, CGSize,
 };
-use objc2_core_graphics::{CGDisplayIsAsleep, CGError, CGMainDisplayID};
+use objc2_core_graphics::{
+  CGDisplayIsAsleep, CGError, CGMainDisplayID, CGWindowListCopyWindowInfo,
+  CGWindowListOption,
+};
 
 use crate::{
   platform_impl::{
@@ -23,6 +26,90 @@ pub(crate) struct NativeWindow {
   pub(crate) id: WindowId,
   pub(crate) element: Arc<ThreadBound<CFRetained<AXUIElement>>>,
   pub(crate) application: Application,
+}
+
+fn alive_after_ax_error(
+  error: &crate::Error,
+  session_suspended: impl FnOnce() -> bool,
+  window_exists: impl FnOnce() -> Option<bool>,
+) -> bool {
+  match error {
+    crate::Error::Accessibility(_, code)
+      if *code == AXError::InvalidUIElement.0 =>
+    {
+      session_suspended()
+    }
+    crate::Error::Accessibility(_, code)
+      if *code == AXError::CannotComplete.0 =>
+    {
+      // A hung app and a dead app both return CannotComplete; WindowServer
+      // distinguishes them without discarding live windows on an AX
+      // timeout.
+      session_suspended() || window_exists().unwrap_or(true)
+    }
+    _ => true,
+  }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+  use super::*;
+
+  fn ax_error(error: AXError) -> crate::Error {
+    crate::Error::Accessibility("AXRole".into(), error.0)
+  }
+
+  #[test]
+  fn cannot_complete_removes_a_window_missing_from_window_server() {
+    assert!(!alive_after_ax_error(
+      &ax_error(AXError::CannotComplete),
+      || false,
+      || Some(false),
+    ));
+  }
+
+  #[test]
+  fn cannot_complete_preserves_a_hung_but_existing_window() {
+    assert!(alive_after_ax_error(
+      &ax_error(AXError::CannotComplete),
+      || false,
+      || Some(true),
+    ));
+  }
+
+  #[test]
+  fn sleep_and_lock_preserve_windows_without_querying_window_server() {
+    for error in [AXError::InvalidUIElement, AXError::CannotComplete] {
+      assert!(alive_after_ax_error(
+        &ax_error(error),
+        || true,
+        || panic!("WindowServer must not be queried while suspended"),
+      ));
+    }
+  }
+
+  #[test]
+  fn unknown_liveness_is_not_treated_as_a_closed_window() {
+    assert!(alive_after_ax_error(
+      &ax_error(AXError::CannotComplete),
+      || false,
+      || None,
+    ));
+    assert!(alive_after_ax_error(
+      &ax_error(AXError::APIDisabled),
+      || panic!("Unrelated AX errors must preserve the window"),
+      || panic!("Unrelated AX errors must preserve the window"),
+    ));
+  }
+
+  #[test]
+  fn invalid_element_is_removed_in_an_active_session() {
+    assert!(!alive_after_ax_error(
+      &ax_error(AXError::InvalidUIElement),
+      || false,
+      || panic!("A definitively invalid AX element needs no CG query"),
+    ));
+  }
 }
 
 impl NativeWindow {
@@ -118,36 +205,47 @@ impl NativeWindow {
 
   /// Implements [`NativeWindow::is_valid`].
   pub(crate) fn is_valid(&self) -> bool {
-    // Query `AXRole`, which is present on all valid `AXUIElement`s.
     self
       .element
-      .with(|el| match el.get_attribute::<CFString>("AXRole") {
-        Err(crate::Error::Accessibility(_, code))
-          if code == AXError::InvalidUIElement.0 =>
-        {
-          let has_login_window = NSWorkspace::sharedWorkspace()
-            .frontmostApplication()
-            .and_then(|app| app.bundleIdentifier())
-            .is_some_and(|id| id.to_string() == "com.apple.loginwindow");
-
-          // AX calls transiently fail with `InvalidUIElement` during
-          // sleep/wake. The window should still be considered valid.
-          //
-          // Events during sleep:
-          //   1. Display goes asleep.
-          //   2. AX calls fail with `InvalidUIElement`.
-          //   3. Login window activates.
-          //
-          // Events during wake:
-          //   1. Display wakes up.
-          //   2. Login window deactivates and AX calls succeed again.
-          //
-          // Perf: `CGDisplayIsAsleep` ~1-5µs, login window check ~1-2ms.
-          CGDisplayIsAsleep(CGMainDisplayID()) || has_login_window
+      .with(|el| {
+        if self.application.ns_app.isTerminated() {
+          return false;
         }
-        _ => true,
+        match el.get_attribute::<CFString>("AXRole") {
+          Ok(_) => true,
+          Err(error) => alive_after_ax_error(
+            &error,
+            || {
+              CGDisplayIsAsleep(CGMainDisplayID())
+                || NSWorkspace::sharedWorkspace()
+                  .frontmostApplication()
+                  .and_then(|app| app.bundleIdentifier())
+                  .is_some_and(|id| {
+                    id.to_string() == "com.apple.loginwindow"
+                  })
+            },
+            || {
+              let exists = CGWindowListCopyWindowInfo(
+                CGWindowListOption::OptionIncludingWindow,
+                self.id.0,
+              )
+              .map(|windows| !windows.is_empty());
+              // WindowServer can omit minimized windows. Require a
+              // successful AXWindows enumeration before treating an absent
+              // CG ID as dead.
+              if exists == Some(false) {
+                self.application.windows().ok().map(|windows| {
+                  windows.iter().any(|window| window.id() == self.id)
+                })
+              } else {
+                exists
+              }
+            },
+          ),
+        }
       })
-      .unwrap_or(false)
+      // A dispatcher timeout is not evidence that the window died.
+      .unwrap_or(true)
   }
 
   /// Implements [`NativeWindow::is_visible`].

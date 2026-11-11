@@ -13,6 +13,8 @@ mod mouse_listener;
 mod native_window;
 mod platform_event;
 mod platform_impl;
+#[cfg(target_os = "macos")]
+mod scoped_dispatch;
 mod single_instance;
 mod thread_bound;
 mod window_listener;

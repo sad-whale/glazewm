@@ -51,30 +51,10 @@ impl EventLoopSource {
     Ok(())
   }
 
-  pub(crate) fn send_dispatch_sync<F>(
-    &self,
-    dispatch_fn: F,
-  ) -> crate::Result<()>
-  where
-    F: FnOnce() + Send,
-  {
-    // SAFETY: Usage of this function needs to be in a synchronous
-    // context where the dispatch function will be executed before the
-    // caller's stack frame is dropped.
-    let dispatch_fn_static = unsafe {
-      std::mem::transmute::<
-        Box<dyn FnOnce() + Send>,
-        Box<dyn FnOnce() + Send + 'static>,
-      >(Box::new(dispatch_fn))
-    };
-
-    self.send_dispatch_async(dispatch_fn_static)
-  }
-
   pub(crate) fn send_stop(&self) -> crate::Result<()> {
     let (result_tx, result_rx) = std::sync::mpsc::channel();
 
-    self.send_dispatch_sync(|| {
+    self.send_dispatch_async(move || {
       let mtm = unsafe { MainThreadMarker::new_unchecked() };
 
       // Call `stop()` to mark the run loop for termination.

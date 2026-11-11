@@ -35,6 +35,17 @@ jobs:
       - name: Check formatting (rustfmt)
         run: cargo fmt --check
 
+      - name: Test window-manager logic
+        run: cargo test --locked -p wm
+
+      - name: Test macOS dispatch cancellation
+        if: matrix.platform == 'macos-latest'
+        run: cargo test --locked -p wm-platform scoped_dispatch -- --test-threads=1
+
+      - name: Test macOS window liveness
+        if: matrix.platform == 'macos-latest'
+        run: cargo test --locked -p wm-platform liveness_tests -- --test-threads=1
+
       # Clippy itself runs `cargo check`, so this will also check for compilation errors.
       - name: Check linting (clippy)
         run: cargo clippy --all-targets --all-features -- -D warnings

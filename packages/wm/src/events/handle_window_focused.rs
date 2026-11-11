@@ -3,6 +3,8 @@ use tracing::info;
 use wm_common::{DisplayState, WindowRuleEvent, WmEvent};
 use wm_platform::NativeWindow;
 
+#[cfg(target_os = "macos")]
+use crate::commands::window::manage_window;
 use crate::{
   commands::{
     container::set_focused_descendant, window::run_window_rules,
@@ -40,6 +42,15 @@ pub fn handle_window_focused(
     state.pending_sync.queue_focus_change();
     return Ok(());
   }
+
+  // AX discovery can fail transiently before a window becomes usable.
+  #[cfg(target_os = "macos")]
+  let found_window = if found_window.is_none() {
+    manage_window(native_window.clone(), None, state, config)?;
+    state.window_from_native(native_window)
+  } else {
+    found_window
+  };
 
   // Ignore the focus event if window is being hidden by the WM.
   if let Some(window) = &found_window {

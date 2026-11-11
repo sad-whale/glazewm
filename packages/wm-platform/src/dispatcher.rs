@@ -406,6 +406,9 @@ impl Dispatcher {
   /// executed directly.
   ///
   /// Returns a `Result` with the closure's return value.
+  ///
+  /// On macOS, a timeout cancels queued work. Already-running work must
+  /// finish before returning so that borrowed data remains valid.
   #[allow(clippy::missing_panics_doc)]
   pub fn dispatch_sync<F, R>(&self, dispatch_fn: F) -> crate::Result<R>
   where
@@ -422,20 +425,27 @@ impl Dispatcher {
       return Ok(dispatch_fn());
     }
 
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    #[cfg(target_os = "macos")]
+    {
+      crate::scoped_dispatch::dispatch_sync(
+        dispatch_fn,
+        |callback| {
+          self.source.as_ref().unwrap().send_dispatch_async(callback)
+        },
+        std::time::Duration::from_secs(5),
+      )
+    }
 
-    // TODO: Block until event loop source is set.
-    self.source.as_ref().unwrap().send_dispatch_sync(move || {
-      let result = dispatch_fn();
-
-      if result_tx.send(result).is_err() {
-        tracing::error!("Failed to send closure result.");
-      }
-    })?;
-
-    result_rx
-      .recv_timeout(std::time::Duration::from_secs(5))
-      .map_err(crate::Error::ChannelRecv)
+    #[cfg(target_os = "windows")]
+    {
+      let (result_tx, result_rx) = std::sync::mpsc::channel();
+      self.source.as_ref().unwrap().send_dispatch_sync(move || {
+        let _ = result_tx.send(dispatch_fn());
+      })?;
+      result_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(crate::Error::ChannelRecv)
+    }
   }
 
   /// Gets the thread ID of the event loop thread.

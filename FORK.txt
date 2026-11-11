@@ -27,9 +27,47 @@ included: this branch addresses display state and layout recovery only.
 A local/ad-hoc build has a different signing identity from upstream. macOS
 may require Accessibility permission to be granted again after installation.
 
+For native macOS login startup, add /Applications/GlazeWM.app in System
+Settings > General > Login Items. Do not add Contents/MacOS/glazewm:
+macOS treats that Unix executable as a Terminal document. Start the bar
+through Launch Services as well:
+
+  startup_commands: ['shell-exec /usr/bin/open -g /Applications/Zebar.app']
+
+Opening the application reuses its running instance. This avoids launching
+a second bar when Zebar is also configured as a separate Login Item.
+
 Overlay-window guard (based on glzr-io/glazewm#1435, a7c2b0a): only normal
 Core Graphics window layer 0 may enter tiling. Recheck the layer after AX
 metadata reads to reject windows promoted to overlays during discovery.
 Main Outlook was measured at layer 0. Its transient meeting notification
 has not yet been captured, so this guard is not a verified Outlook-specific
 fix. No process/title-wide Outlook ignore rule is installed.
+
+Local audit: macOS synchronous dispatch cancels pending callbacks before a
+borrowed closure can outlive its caller; running callbacks release borrows
+before the caller returns. A focused, previously undiscovered window is
+retried through the normal discovery checks. Explicit ignores are retained
+until window destruction, and duplicate discovery is a no-op.
+
+Browser IPC clients must use a loopback HTTP(S) origin or tauri://localhost.
+Origin-less native clients remain supported. Remote and opaque origins are
+rejected before the WebSocket connection is established. This does not
+authenticate other local processes.
+
+Application observers own their callback context instead of leaking a raw
+Box. The owner invalidates the source on registration failure and shutdown;
+thread-bound cleanup waits for in-flight main-thread callbacks. The retained
+reference returned by AXObserverCreate is adopted without an extra retain.
+
+Window lifecycle recovery: AX CannotComplete alone no longer keeps a dead
+window alive forever. During an active session, consult WindowServer for
+that exact window ID. If it is absent, require AXWindows to confirm removal;
+WindowServer can omit minimized windows. Preserve windows when liveness
+cannot be established or the session is suspended.
+Confirmed terminated applications are invalid without another AX request.
+The five-second cleanup runs the regular destruction handler and flushes
+pending layout changes immediately. Observer registration is retried on
+application activation if AX was not ready at launch.
+
+  cargo test --locked -p wm-platform liveness_tests -- --test-threads=1
